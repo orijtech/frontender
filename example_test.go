@@ -1,13 +1,17 @@
-# frontender
-Setup a server frontend with HTTPS that then proxies to traffic to a backend/cluster.
+// Copyright 2017 orijtech. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-This project is used inside orijtech to create for folks HTTPS servers that can then be
-put in Docker images, or automatically uploaded to respective cloud storage systems
-and passed into some container engine for a disk image.
-
-## Examples:
-* Preamble with imports:
-```go
 package frontender_test
 
 import (
@@ -17,11 +21,8 @@ import (
 
 	"github.com/orijtech/frontender"
 )
-```
 
-* Plain listen as a server:
-```go
-func listen() {
+func Example_Listen() {
 	lc, err := frontender.Listen(&frontender.Request{
 		Domains: []string{
 			"git.orijtech.com",
@@ -42,11 +43,8 @@ func listen() {
 		log.Fatal(err)
 	}
 }
-```
 
-* Generate the binary of the server for a platform
-```go
-func generateBinary() {
+func Example_GenerateBinary() {
 	rc, err := frontender.GenerateBinary(&frontender.DeployInfo{
 		FrontendConfig: &frontender.Request{
 			Domains: []string{
@@ -72,11 +70,8 @@ func generateBinary() {
 
 	io.Copy(f, rc)
 }
-```
 
-* Generate a Docker image for the server
-```go
-func generateDockerImage() {
+func Example_GenerateDockerImage() {
 	imageName, err := frontender.GenerateDockerImage(&frontender.DeployInfo{
 		CanonicalImageNamePrefix: "frontender",
 		FrontendConfig: &frontender.Request{
@@ -97,4 +92,3 @@ func generateDockerImage() {
 	}
 	log.Printf("ImageName: %q\n", imageName)
 }
-```
