@@ -1,4 +1,6 @@
 # frontender
+![](./assets/logo.png)
+
 Setup a server frontend with HTTPS that then proxies to traffic to a backend/cluster.
 
 This project is used inside orijtech to create for folks HTTPS servers that can then be
