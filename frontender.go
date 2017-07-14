@@ -48,6 +48,8 @@ type Request struct {
 
 	Environ    []string `json:"environ"`
 	TargetGOOS string   `json:"target_goos"`
+
+	CertKeyFiler func() (string, string)
 }
 
 var (
@@ -129,6 +131,11 @@ func (req *Request) runNonHTTPSRedirector() error {
 		nonHTTPSAddr = ":80"
 	}
 
+	if req.CertKeyFiler != nil {
+		cert, keyfile := req.CertKeyFiler()
+		return http.ListenAndServeTLS(nonHTTPSAddr, cert, keyfile, nil)
+	}
+
 	return http.ListenAndServe(nonHTTPSAddr, otils.RedirectAllTrafficTo(redirectURL))
 }
 
@@ -169,7 +176,7 @@ func Listen(req *Request) (*ListenConfirmation, error) {
 		if !req.HTTP1 {
 			domainsListener = autocert.NewListener
 		} else {
-			listener, err := net.Listen("tcp", ":80")
+			listener, err := net.Listen("tcp", req.NonHTTPSAddr)
 			if err != nil {
 				return nil, err
 			}
