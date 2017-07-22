@@ -156,6 +156,9 @@ func (req *Request) needsDomains() bool {
 	return req.HTTP1 == false
 }
 
+// The goal is to be able to pass in proxy servers, keep a 
+// persistent connection to each one of them and use that
+// as the weight to figure out which one to send traffic to.
 func Listen(req *Request) (*ListenConfirmation, error) {
 	if err := req.Validate(); err != nil {
 		return nil, err
