@@ -106,6 +106,7 @@ type Liveliness struct {
 	PeerID string `json:"peer_id"`
 	Ping   *Ping  `json:"ping"`
 	Err    error  `json:"error"`
+	Addr   string `json:"addr,omitepty"`
 }
 
 type LivelyRequest struct {
@@ -135,14 +136,20 @@ func (p *Peer) Liveliness(llv *LivelyRequest) (livePeers, nonLivePeers []*Liveli
 	}
 	resChan := semalim.Run(jobsBench, uint64(concurrentPings))
 	for res := range resChan {
-		pping := res.Value().(*Ping)
+		addrpPing := res.Value().(*addrPing)
+		peerAddr, pping := addrpPing.addr, addrpPing.ping
 		peerID := res.Id().(string)
 		err := res.Err()
 		ptr := &nonLivePeers
 		if err == nil && pping != nil {
 			ptr = &livePeers
 		}
-		*ptr = append(*ptr, &Liveliness{Err: err, PeerID: peerID, Ping: pping})
+		*ptr = append(*ptr, &Liveliness{
+			Err:    err,
+			PeerID: peerID,
+			Ping:   pping,
+			Addr:   peerAddr,
+		})
 	}
 
 	return livePeers, nonLivePeers, nil
@@ -160,6 +167,12 @@ func (pp *peerPing) Id() interface{} {
 	return pp.id
 }
 
+type addrPing struct {
+	addr string
+	ping *Ping
+}
+
 func (pp *peerPing) Do() (interface{}, error) {
-	return pp.self.ping(pp.peer)
+	ping, err := pp.self.ping(pp.peer)
+	return &addrPing{addr: pp.peer.Addr, ping: ping}, err
 }

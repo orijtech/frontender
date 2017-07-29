@@ -56,7 +56,7 @@ func TestListen(t *testing.T) {
 
 		DomainsListener:     domainsListener,
 		NonHTTPSRedirectURL: nonHTTPSBackend.URL,
-		ProxyAddress:        ts.URL,
+		ProxyAddresses:      []string{ts.URL},
 	})
 	if err != nil {
 		t.Fatalf("listening err: %v", err)
@@ -115,8 +115,11 @@ func TestRequestValidate(t *testing.T) {
 		1: {req: &frontender.Request{}, wantErr: true},
 		2: {
 			req: &frontender.Request{
-				Domains:      []string{"golang.org/"},
-				ProxyAddress: "http://192.168.1.104/",
+				Domains: []string{"golang.org/"},
+				ProxyAddresses: []string{
+					"http://192.168.1.104/",
+					"http://localhost:9999/",
+				},
 			},
 		},
 		3: {

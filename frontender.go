@@ -17,16 +17,19 @@ package frontender
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"net"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/acme/autocert"
 
+	"github.com/orijtech/frontender/lively"
 	"github.com/orijtech/otils"
+
+	"github.com/odeke-em/go-uuid"
 )
 
 type Request struct {
@@ -39,7 +42,7 @@ type Request struct {
 
 	NoAutoWWW bool `json:"no_auto_www"`
 
-	ProxyAddress string `json:"proxy_address"`
+	ProxyAddresses []string `json:"proxy_addresses"`
 
 	NonHTTPSRedirectURL string `json:"non_https_redirect_url"`
 	NonHTTPSAddr        string `json:"non_https_addr"`
@@ -59,8 +62,15 @@ var (
 	errEmptyProxyAddress = errors.New("expecting a non-empty proxy server address")
 )
 
+func (req *Request) hasAtLeastOneProxy() bool {
+	if req == nil {
+		return false
+	}
+	return otils.FirstNonEmptyString(req.ProxyAddresses...) != ""
+}
+
 func (req *Request) Validate() error {
-	if req == nil || strings.TrimSpace(req.ProxyAddress) == "" {
+	if !req.hasAtLeastOneProxy() {
 		return errEmptyProxyAddress
 	}
 	if req.needsDomains() && strings.TrimSpace(otils.FirstNonEmptyString(req.Domains...)) == "" {
@@ -72,7 +82,7 @@ func (req *Request) Validate() error {
 type Server struct {
 	Domains []string `json:"domains"`
 
-	ProxyAddress string `json:"proxy_address"`
+	ProxyAddresses []string `json:"proxy_addresses"`
 
 	NonHTTPSRedirectURL string `json:"non_https_redirect_url"`
 }
@@ -156,7 +166,7 @@ func (req *Request) needsDomains() bool {
 	return req.HTTP1 == false
 }
 
-// The goal is to be able to pass in proxy servers, keep a 
+// The goal is to be able to pass in proxy servers, keep a
 // persistent connection to each one of them and use that
 // as the weight to figure out which one to send traffic to.
 func Listen(req *Request) (*ListenConfirmation, error) {
@@ -164,10 +174,10 @@ func Listen(req *Request) (*ListenConfirmation, error) {
 		return nil, err
 	}
 
-	proxyURL, err := url.Parse(req.ProxyAddress)
-	if err != nil {
-		return nil, err
-	}
+	// proxyURL, err := url.Parse(req.ProxyAddress)
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	madeDomains := req.SynthesizeDomains()
 	if req.needsDomains() && len(madeDomains) == 0 {
@@ -188,10 +198,129 @@ func Listen(req *Request) (*ListenConfirmation, error) {
 	}
 	listener := domainsListener(madeDomains...)
 
-	return req.runAndCreateListener(listener, proxyURL)
+	return req.runAndCreateListener(listener)
 }
 
-func (req *Request) runAndCreateListener(listener net.Listener, proxyURL *url.URL) (*ListenConfirmation, error) {
+type livelyProxy struct {
+	mu sync.Mutex
+
+	next int
+
+	cycleFreq time.Duration
+
+	primary  *lively.Peer
+	peersMap map[string]*lively.Peer
+
+	liveAddresses []string
+}
+
+const defaultCycleFrequence = time.Minute * 3
+
+type cycleFeedback struct {
+	cycleNumber uint64
+	err         error
+
+	livePeers, nonLivePeers []*lively.Liveliness
+}
+
+func (lp *livelyProxy) run() chan *cycleFeedback {
+	lp.mu.Lock()
+	freq := lp.cycleFreq
+	lp.mu.Unlock()
+
+	if freq <= 0 {
+		freq = defaultCycleFrequence
+	}
+
+	feedbackChan := make(chan *cycleFeedback)
+	go func() {
+		defer close(feedbackChan)
+		cycleNumber := uint64(0)
+
+		for {
+			cycleNumber += 1
+			livePeers, nonLivePeers, err := lp.cycle()
+			feedbackChan <- &cycleFeedback{
+				err:          err,
+				cycleNumber:  cycleNumber,
+				livePeers:    livePeers,
+				nonLivePeers: nonLivePeers,
+			}
+		}
+	}()
+
+	return feedbackChan
+}
+
+func (lp *livelyProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	proxyAddr := lp.roundRobinedAddress()
+	http.Redirect(w, r, proxyAddr, http.StatusPermanentRedirect)
+}
+
+func (lp *livelyProxy) roundRobinedAddress() string {
+	lp.mu.Lock()
+	if lp.next >= len(lp.liveAddresses) {
+		lp.next = 0
+	}
+	addr := lp.liveAddresses[lp.next]
+	// Now increment it
+	lp.next += 1
+	lp.mu.Unlock()
+
+	return addr
+}
+
+func (lp *livelyProxy) cycle() (livePeers, nonLivePeers []*lively.Liveliness, err error) {
+	lp.mu.Lock()
+	primary := lp.primary
+	lp.mu.Unlock()
+
+	livePeers, nonLivePeers, err = primary.Liveliness(&lively.LivelyRequest{})
+
+	lp.mu.Lock()
+	var liveAddresses []string
+	for _, peer := range livePeers {
+		liveAddresses = append(liveAddresses, peer.Addr)
+	}
+
+	// Now reset the next index and shuffle the liveAddresses.
+	lp.next = 0
+	perm := rand.Perm(len(liveAddresses))
+	var shuffledAddresses []string
+	for _, i := range perm {
+		shuffledAddresses = append(shuffledAddresses, liveAddresses[i])
+	}
+	lp.liveAddresses = shuffledAddresses
+	lp.mu.Unlock()
+
+	return livePeers, nonLivePeers, err
+}
+
+func makeLivelyProxy(addresses []string) *livelyProxy {
+	primary := &lively.Peer{
+		ID:      uuid.NewRandom().String(),
+		Primary: true,
+	}
+
+	peersMap := make(map[string]*lively.Peer)
+	for _, addr := range addresses {
+		secondary := &lively.Peer{
+			Addr: addr,
+			ID:   uuid.NewRandom().String(),
+		}
+		_ = primary.AddPeer(secondary)
+		peersMap[secondary.ID] = secondary
+	}
+
+	return &livelyProxy{
+		primary:  primary,
+		peersMap: peersMap,
+
+		cycleFreq: time.Minute * 3,
+	}
+}
+
+func (req *Request) runAndCreateListener(listener net.Listener) (*ListenConfirmation, error) {
 	var closeOnce sync.Once
 	errsChan := make(chan error)
 	closeFn := func() error {
@@ -211,8 +340,10 @@ func (req *Request) runAndCreateListener(listener net.Listener, proxyURL *url.UR
 	go func() {
 		defer close(errsChan)
 
-		proxy := httputil.NewSingleHostReverseProxy(proxyURL)
-		errsChan <- http.Serve(listener, proxy)
+		// Per cycle of liveliness, figure out what is lively
+		// what isn't
+		lproxy := makeLivelyProxy(req.ProxyAddresses)
+		errsChan <- http.Serve(listener, lproxy)
 	}()
 
 	return lc, nil

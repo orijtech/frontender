@@ -30,7 +30,11 @@ func Example_Listen() {
 		},
 		NonHTTPSRedirectURL: "https://git.orijtech.com",
 
-		ProxyAddress: "http://localhost:9845",
+		ProxyAddresses: []string{
+			"http://localhost:9845",
+			"http://localhost:8888",
+			"http://localhost:4447",
+		},
 
 		NoAutoWWW: true,
 	})
@@ -52,7 +56,10 @@ func Example_GenerateBinary() {
 				"medisa.orijtech.com",
 				"m.orijtech.com",
 			},
-			ProxyAddress: "http://192.168.1.105:9855",
+			ProxyAddresses: []string{
+				"http://192.168.1.105:9855",
+				"http://192.168.1.140:8998",
+			},
 		},
 		TargetGOOS: "linux",
 		Environ:    []string{"CGO_ENABLED=0"},
@@ -81,7 +88,10 @@ func Example_GenerateDockerImage() {
 			},
 			NonHTTPSRedirectURL: "https://git.orijtech.com",
 
-			ProxyAddress: "http://localhost:9845",
+			ProxyAddresses: []string{
+				"http://localhost:9845",
+				"http://192.168.1.100:9845",
+			},
 
 			NoAutoWWW: true,
 		},
