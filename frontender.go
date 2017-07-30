@@ -20,6 +20,8 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +55,11 @@ type Request struct {
 	TargetGOOS string   `json:"target_goos"`
 
 	CertKeyFiler func() (string, string)
+
+	// BackendPingPeriod if set, defines the period
+	// between which the frontend service will check
+	// for the liveliness of the backends.
+	BackendPingPeriod time.Duration
 }
 
 var (
@@ -246,6 +253,7 @@ func (lp *livelyProxy) run() chan *cycleFeedback {
 				livePeers:    livePeers,
 				nonLivePeers: nonLivePeers,
 			}
+			<-time.After(freq)
 		}
 	}()
 
@@ -254,7 +262,15 @@ func (lp *livelyProxy) run() chan *cycleFeedback {
 
 func (lp *livelyProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxyAddr := lp.roundRobinedAddress()
-	http.Redirect(w, r, proxyAddr, http.StatusPermanentRedirect)
+	// Now proxy the traffic to that request
+	parsedURL, err := url.Parse(proxyAddr)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rproxy := httputil.NewSingleHostReverseProxy(parsedURL)
+	rproxy.ServeHTTP(w, r)
 }
 
 func (lp *livelyProxy) roundRobinedAddress() string {
@@ -296,7 +312,7 @@ func (lp *livelyProxy) cycle() (livePeers, nonLivePeers []*lively.Liveliness, er
 	return livePeers, nonLivePeers, err
 }
 
-func makeLivelyProxy(addresses []string) *livelyProxy {
+func makeLivelyProxy(cycleFreq time.Duration, addresses []string) *livelyProxy {
 	primary := &lively.Peer{
 		ID:      uuid.NewRandom().String(),
 		Primary: true,
@@ -316,7 +332,7 @@ func makeLivelyProxy(addresses []string) *livelyProxy {
 		primary:  primary,
 		peersMap: peersMap,
 
-		cycleFreq: time.Minute * 3,
+		cycleFreq: cycleFreq,
 	}
 }
 
@@ -342,7 +358,15 @@ func (req *Request) runAndCreateListener(listener net.Listener) (*ListenConfirma
 
 		// Per cycle of liveliness, figure out what is lively
 		// what isn't
-		lproxy := makeLivelyProxy(req.ProxyAddresses)
+		lproxy := makeLivelyProxy(req.BackendPingPeriod, req.ProxyAddresses)
+		go func() {
+			feedbackChan := lproxy.run()
+			for feedback := range feedbackChan {
+				if err := feedback.err; err != nil {
+					errsChan <- err
+				}
+			}
+		}()
 		errsChan <- http.Serve(listener, lproxy)
 	}()
 

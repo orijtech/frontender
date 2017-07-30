@@ -33,6 +33,8 @@ type Ping struct {
 	Clock  int64  `json:"clock"`
 }
 
+var blankPing = new(Ping)
+
 func (e *Peer) ping(other *Peer) (*Ping, error) {
 	blob, err := json.Marshal(&Ping{PeerID: e.ID, Clock: time.Now().Unix()})
 	if err != nil {
@@ -50,7 +52,18 @@ func (e *Peer) ping(other *Peer) (*Ping, error) {
 		return nil, err
 	}
 	if !otils.StatusOK(res.StatusCode) {
-		return nil, errors.New(res.Status)
+		// There is an exception::
+		// 1) Not every backend service is bound to have a /ping route defined
+		// Therefore to make adoption easy and for compatibility with legacy
+		// systems, if the status code is 404 Not Found, for which the server
+		// was actually hit but said it didn't find the /ping route,
+		// then treat the 404 as a liveliness sign
+		switch res.StatusCode {
+		case http.StatusNotFound:
+			return blankPing, nil
+		default:
+			return nil, errors.New(res.Status)
+		}
 	}
 	slurp, err := ioutil.ReadAll(res.Body)
 	if err != nil {
