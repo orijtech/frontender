@@ -2,12 +2,14 @@ package lively_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -132,4 +134,83 @@ func makeResp(status string, code int, body io.ReadCloser) *http.Response {
 		Body:       body,
 		Header:     make(http.Header),
 	}
+}
+
+type closeCheck struct {
+	once       sync.Once
+	rc         io.ReadCloser
+	closedChan chan interface{}
+}
+
+var closedSentinel = "it has been closed"
+
+func (c *closeCheck) Close() error {
+	var err error = errAlreadyClosed
+	c.once.Do(func() {
+		err = c.rc.Close()
+		c.closedChan <- closedSentinel
+	})
+	return err
+}
+
+func (c *closeCheck) Read(b []byte) (int, error) {
+	return c.rc.Read(b)
+}
+
+func TestEnsurePingClosesBodyIfNonNil(t *testing.T) {
+	baseAddr := "http://192.168.1.68"
+	peers := nPeers(2, baseAddr)
+	primary := peers[0]
+	primary.Primary = true
+	secondary := peers[1]
+	primary.AddPeer(secondary)
+
+	statuses := [...]int{
+		0: http.StatusOK,
+		1: http.StatusInternalServerError,
+		2: http.StatusBadRequest,
+		3: http.StatusTemporaryRedirect,
+	}
+
+	for i, statusCode := range statuses {
+		ccheck := newCloseCheck()
+		primary.SetHTTPRoundTripper(&closeRoundTripper{body: ccheck, statusCode: statusCode})
+		_, _, err := primary.Liveliness(nil)
+		if err != nil {
+			t.Errorf("#%d: liveliness err=(%v)", i, err)
+			continue
+		}
+		closedRecv := <-ccheck.closedChan
+		if got, want := closedRecv, closedSentinel; got != want {
+			t.Errorf("#%d: got=(%v) want=(%v)", i, got, want)
+		}
+	}
+}
+
+var errAlreadyClosed = errors.New("already closed")
+
+func newCloseCheck() *closeCheck {
+	prc, pwc := io.Pipe()
+	go func() {
+		_, _ = pwc.Write([]byte(`{}`))
+		_ = pwc.Close()
+	}()
+
+	return &closeCheck{
+		rc: prc,
+
+		closedChan: make(chan interface{}, 1),
+	}
+}
+
+type closeRoundTripper struct {
+	body       *closeCheck
+	statusCode int
+}
+
+func (cr *closeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Replace the body with a custom closer to
+	// ensure we can see if the body gets closed!
+	resp := makeResp(`Foo OK`, cr.statusCode, cr.body)
+	return resp, nil
 }

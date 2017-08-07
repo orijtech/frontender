@@ -124,16 +124,6 @@ func (req *Request) SynthesizeDomains() []string {
 	return finalList
 }
 
-type proxy struct {
-	proxyAddress string
-}
-
-func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, p.proxyAddress, http.StatusPermanentRedirect)
-}
-
-var _ http.Handler = (*proxy)(nil)
-
 func (req *Request) runNonHTTPSRedirector() error {
 	if req.HTTP1 {
 		return nil

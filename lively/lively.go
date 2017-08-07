@@ -51,6 +51,9 @@ func (e *Peer) ping(other *Peer) (*Ping, error) {
 	if err != nil {
 		return nil, err
 	}
+	if res.Body != nil {
+		defer res.Body.Close()
+	}
 	if !otils.StatusOK(res.StatusCode) {
 		// There is an exception::
 		// 1) Not every backend service is bound to have a /ping route defined
