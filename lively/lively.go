@@ -62,10 +62,9 @@ func (e *Peer) ping(other *Peer) (*Ping, error) {
 		// was actually hit but said it didn't find the /ping route,
 		// then treat the 404 as a liveliness sign
 		switch res.StatusCode {
-		case http.StatusNotFound:
-			return blankPing, nil
 		default:
-			return nil, errors.New(res.Status)
+			return blankPing, nil
+			// return nil, errors.New(res.Status)
 		}
 	}
 	slurp, err := ioutil.ReadAll(res.Body)
