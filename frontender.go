@@ -265,6 +265,9 @@ func (lp *livelyProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (lp *livelyProxy) roundRobinedAddress() string {
 	lp.mu.Lock()
+	if len(lp.liveAddresses) == 0 {
+		return ""
+	}
 	if lp.next >= len(lp.liveAddresses) {
 		lp.next = 0
 	}

@@ -72,9 +72,8 @@ func (e *Peer) ping(other *Peer) (*Ping, error) {
 		return nil, err
 	}
 	recv := new(Ping)
-	if err := json.Unmarshal(slurp, recv); err != nil {
-		return nil, err
-	}
+	// We don't really care about the error returned
+	_ = json.Unmarshal(slurp, recv)
 	return recv, nil
 }
 
