@@ -3,10 +3,12 @@ package main
 import (
 	"flag"
 	"log"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/orijtech/frontender"
+	"github.com/orijtech/namespace"
 )
 
 func main() {
@@ -17,6 +19,7 @@ func main() {
 	var csvDomains string
 	var noAutoWWW bool
 	var nonHTTPSRedirectURL string
+	var routeFile string
 
 	flag.StringVar(&csvBackendAddresses, "csv-backends", "", "the comma separated addresses of the backend servers")
 	flag.StringVar(&csvDomains, "domains", "", "the comma separated domains that the frontend will be representing")
@@ -25,11 +28,31 @@ func main() {
 	flag.StringVar(&nonHTTPSRedirectURL, "non-https-redirect", "", "the URL to which all non-HTTPS traffic will be redirected")
 	flag.BoolVar(&noAutoWWW, "no-auto-www", false, "if set, explicits tells the frontend service NOT to make equivalent www CNAMEs of domains, if the www CNAMEs haven't yet been set")
 	flag.StringVar(&backendPingPeriodStr, "backend-ping-period", "3m", `the period for which the frontend should ping the backend servers. Please enter this value with the form <DIGIT><UNIT> where <UNIT> could be  "ns", "us" (or "µs"), "ms", "s", "m", "h"`)
+	flag.StringVar(&routeFile, "route-file", "", "the file containing the routing")
 	flag.Parse()
+	f, err := os.Open(routeFile)
+	if err != nil && false {
+		log.Fatalf("route-file: %v\n", err)
+	}
+	if f != nil {
+		defer f.Close()
+	}
+
+	ns, err := namespace.ParseWithHeaderDelimiter(f, ",")
+	if err != nil {
+		log.Fatalf("namespace: %v", err)
+	}
 
 	var pingPeriod time.Duration
 	if t, err := time.ParseDuration(backendPingPeriodStr); err == nil {
 		pingPeriod = t
+	}
+
+	proxyAddresses := splitAndTrimAddresses(csvBackendAddresses)
+	if len(ns) == 0 {
+		for _, addr := range proxyAddresses {
+			ns[namespace.GlobalNamespaceKey] = append(ns[namespace.GlobalNamespaceKey], addr)
+		}
 	}
 
 	fReq := &frontender.Request{
@@ -40,8 +63,9 @@ func main() {
 		NonHTTPSAddr:        nonHTTPSAddr,
 		NonHTTPSRedirectURL: nonHTTPSRedirectURL,
 
-		ProxyAddresses:    splitAndTrimAddresses(csvBackendAddresses),
 		BackendPingPeriod: pingPeriod,
+		PrefixRouter:      (map[string][]string)(ns),
+		ProxyAddresses:    proxyAddresses,
 	}
 
 	confirmation, err := frontender.Listen(fReq)

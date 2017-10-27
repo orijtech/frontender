@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +61,16 @@ type Request struct {
 	// between which the frontend service will check
 	// for the liveliness of the backends.
 	BackendPingPeriod time.Duration
+
+	// PrefixRouter if set helps route traffic depending on
+	// the route prefix e.g
+	// {
+	//    "/bar": ["http://localhost:7997", "http://localhost:8888"],
+	//    "/foo": ["http://localhost:8999", "http://localhost:8877"]
+	// }
+	// if it gets traffic with a URL prefix "/foo" will distribute traffic
+	// between "http://localhost:8999" and "http://localhost:8877".
+	PrefixRouter map[string][]string `json:"routing"`
 }
 
 var (
@@ -73,7 +84,15 @@ func (req *Request) hasAtLeastOneProxy() bool {
 	if req == nil {
 		return false
 	}
-	return otils.FirstNonEmptyString(req.ProxyAddresses...) != ""
+	if len(req.PrefixRouter) == 0 {
+		return otils.FirstNonEmptyString(req.ProxyAddresses...) != ""
+	}
+	for _, proxyAddresses := range req.PrefixRouter {
+		if otils.FirstNonEmptyString(proxyAddresses...) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (req *Request) Validate() error {
@@ -201,14 +220,16 @@ func Listen(req *Request) (*ListenConfirmation, error) {
 type livelyProxy struct {
 	mu sync.Mutex
 
-	next int
+	next map[string]int
 
 	cycleFreq time.Duration
 
-	primary  *lively.Peer
-	peersMap map[string]*lively.Peer
+	primariesMap   map[string]*lively.Peer
+	secondariesMap map[string]map[string]*lively.Peer
 
-	liveAddresses []string
+	longestPrefixFirst []string
+
+	liveAddresses map[string][]string
 }
 
 const defaultCycleFrequence = time.Minute * 3
@@ -220,7 +241,7 @@ type cycleFeedback struct {
 	livePeers, nonLivePeers []*lively.Liveliness
 }
 
-func (lp *livelyProxy) run() chan *cycleFeedback {
+func (lp *livelyProxy) run() map[string]chan *cycleFeedback {
 	lp.mu.Lock()
 	freq := lp.cycleFreq
 	lp.mu.Unlock()
@@ -229,29 +250,50 @@ func (lp *livelyProxy) run() chan *cycleFeedback {
 		freq = defaultCycleFrequence
 	}
 
-	feedbackChan := make(chan *cycleFeedback)
-	go func() {
-		defer close(feedbackChan)
-		cycleNumber := uint64(0)
+	feedbackChanMap := make(map[string]chan *cycleFeedback)
+	for route, primary := range lp.primariesMap {
+		feedbackChan := make(chan *cycleFeedback)
+		go func(route string, primary *lively.Peer, feedbackChan chan *cycleFeedback) {
+			defer close(feedbackChan)
+			cycleNumber := uint64(0)
 
-		for {
-			cycleNumber += 1
-			livePeers, nonLivePeers, err := lp.cycle()
-			feedbackChan <- &cycleFeedback{
-				err:          err,
-				cycleNumber:  cycleNumber,
-				livePeers:    livePeers,
-				nonLivePeers: nonLivePeers,
+			for {
+				cycleNumber += 1
+				livePeers, nonLivePeers, err := lp.cycle(route, primary)
+				feedbackChan <- &cycleFeedback{
+					err:          err,
+					cycleNumber:  cycleNumber,
+					livePeers:    livePeers,
+					nonLivePeers: nonLivePeers,
+				}
+				<-time.After(freq)
 			}
-			<-time.After(freq)
-		}
-	}()
+		}(route, primary, feedbackChan)
+	}
 
-	return feedbackChan
+	return feedbackChanMap
 }
 
 func (lp *livelyProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	proxyAddr := lp.roundRobinedAddress()
+	// Firstly we need to find a primary match
+	var matchedRoute string
+	// We need to match by longest prefix first
+	// so that cases like
+	// * "/"
+	// * "/foo"
+	// * "/fo"
+	// given * "/foo"
+	// will always match "/foo" instead of "/" or "/fo"
+	// however in the absence of "/foo", "/fo" will match before "/"
+	longestPrefixFirst := lp.longestPrefixFirst
+	for _, routePrefix := range longestPrefixFirst {
+		if strings.HasPrefix(r.URL.Path, routePrefix) {
+			matchedRoute = routePrefix
+			break
+		}
+	}
+
+	proxyAddr := lp.roundRobinedAddress(matchedRoute)
 	// Now proxy the traffic to that request
 	parsedURL, err := url.Parse(proxyAddr)
 	if err != nil {
@@ -259,73 +301,97 @@ func (lp *livelyProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.URL.Path = strings.TrimPrefix(r.URL.Path, matchedRoute)
+	if !strings.HasPrefix(r.URL.Path, "/") {
+		r.URL.Path = "/" + r.URL.Path
+	}
 	rproxy := httputil.NewSingleHostReverseProxy(parsedURL)
 	rproxy.ServeHTTP(w, r)
 }
 
-func (lp *livelyProxy) roundRobinedAddress() string {
+func (lp *livelyProxy) roundRobinedAddress(route string) string {
 	lp.mu.Lock()
-	if len(lp.liveAddresses) == 0 {
+	defer lp.mu.Unlock()
+
+	liveAddresses := lp.liveAddresses[route]
+	if len(liveAddresses) == 0 {
 		return ""
 	}
-	if lp.next >= len(lp.liveAddresses) {
-		lp.next = 0
+	if lp.next[route] >= len(liveAddresses) {
+		lp.next[route] = 0
 	}
-	addr := lp.liveAddresses[lp.next]
+	addr := liveAddresses[lp.next[route]]
 	// Now increment it
-	lp.next += 1
-	lp.mu.Unlock()
+	lp.next[route] += 1
 
 	return addr
 }
 
-func (lp *livelyProxy) cycle() (livePeers, nonLivePeers []*lively.Liveliness, err error) {
-	lp.mu.Lock()
-	primary := lp.primary
-	lp.mu.Unlock()
-
+func (lp *livelyProxy) cycle(route string, primary *lively.Peer) (livePeers, nonLivePeers []*lively.Liveliness, err error) {
 	livePeers, nonLivePeers, err = primary.Liveliness(&lively.LivelyRequest{})
 
 	lp.mu.Lock()
+	defer lp.mu.Unlock()
+
 	var liveAddresses []string
 	for _, peer := range livePeers {
 		liveAddresses = append(liveAddresses, peer.Addr)
 	}
 
-	// Now reset the next index and shuffle the liveAddresses.
-	lp.next = 0
+	// Now reset the next index.
+	lp.next[route] = 0
+
+	// Shuffle the liveAddresses.
 	perm := rand.Perm(len(liveAddresses))
 	var shuffledAddresses []string
 	for _, i := range perm {
 		shuffledAddresses = append(shuffledAddresses, liveAddresses[i])
 	}
-	lp.liveAddresses = shuffledAddresses
-	lp.mu.Unlock()
+	lp.liveAddresses[route] = shuffledAddresses
 
 	return livePeers, nonLivePeers, err
 }
 
-func makeLivelyProxy(cycleFreq time.Duration, addresses []string) *livelyProxy {
-	primary := &lively.Peer{
-		ID:      uuid.NewRandom().String(),
-		Primary: true,
-	}
-
-	peersMap := make(map[string]*lively.Peer)
-	for _, addr := range addresses {
-		secondary := &lively.Peer{
-			Addr: addr,
-			ID:   uuid.NewRandom().String(),
+func makeLivelyProxy(cycleFreq time.Duration, pr map[string][]string) *livelyProxy {
+	secondariesMap := make(map[string]map[string]*lively.Peer)
+	primariesMap := make(map[string]*lively.Peer)
+	for prefix, addresses := range pr {
+		primary := &lively.Peer{
+			ID:      uuid.NewRandom().String(),
+			Primary: true,
 		}
-		_ = primary.AddPeer(secondary)
-		peersMap[secondary.ID] = secondary
+
+		peersMap := make(map[string]*lively.Peer)
+		for _, addr := range addresses {
+			secondary := &lively.Peer{
+				Addr: addr,
+				ID:   uuid.NewRandom().String(),
+			}
+			_ = primary.AddPeer(secondary)
+			peersMap[secondary.ID] = secondary
+		}
+		secondariesMap[prefix] = peersMap
+		primariesMap[prefix] = primary
 	}
 
-	return &livelyProxy{
-		primary:  primary,
-		peersMap: peersMap,
+	routePrefixes := make([]string, 0, len(pr))
+	for routePrefix := range pr {
+		routePrefixes = append(routePrefixes, routePrefix)
+	}
 
-		cycleFreq: cycleFreq,
+	sort.Slice(routePrefixes, func(i, j int) bool {
+		// Sort in reverse by length
+		si, sj := routePrefixes[i], routePrefixes[j]
+		return len(si) >= len(sj)
+	})
+	return &livelyProxy{
+		longestPrefixFirst: routePrefixes,
+		primariesMap:       primariesMap,
+		secondariesMap:     secondariesMap,
+		cycleFreq:          cycleFreq,
+
+		next:          make(map[string]int),
+		liveAddresses: make(map[string][]string),
 	}
 }
 
@@ -351,13 +417,17 @@ func (req *Request) runAndCreateListener(listener net.Listener) (*ListenConfirma
 
 		// Per cycle of liveliness, figure out what is lively
 		// what isn't
-		lproxy := makeLivelyProxy(req.BackendPingPeriod, req.ProxyAddresses)
+		lproxy := makeLivelyProxy(req.BackendPingPeriod, req.PrefixRouter)
 		go func() {
-			feedbackChan := lproxy.run()
-			for feedback := range feedbackChan {
-				if err := feedback.err; err != nil {
-					errsChan <- err
-				}
+			feedbackChanMap := lproxy.run()
+			for route, feedbackChan := range feedbackChanMap {
+				go func(route string, feedbackChan chan *cycleFeedback) {
+					for feedback := range feedbackChan {
+						if err := feedback.err; err != nil {
+							errsChan <- err
+						}
+					}
+				}(route, feedbackChan)
 			}
 		}()
 		errsChan <- http.Serve(listener, lproxy)
